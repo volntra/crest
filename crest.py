@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""crest: Rockhopper's declarative package manager (v0.2)."""
+"""crest: Rockhopper's declarative package manager (v0.3)."""
 
 import os
 import re
@@ -7,9 +7,34 @@ import subprocess
 import sys
 import tomllib
 
+import portage
+from portage.exception import InvalidAtom
+
 CONFIG = "/etc/rockhopper/system.toml"
 WORLD = "/var/lib/portage/world"
 SNAPSHOT_DIR = "/.snapshots"
+
+# Rockhopper palette, only used when printing to a real terminal
+if sys.stdout.isatty():
+    PINE = "\033[38;2;42;140;116m"
+    PINE_LIGHT = "\033[38;2;79;184;156m"
+    BEAK = "\033[38;2;232;105;46m"
+    EYE = "\033[38;2;210;56;63m"
+    RESET = "\033[0m"
+else:
+    PINE = PINE_LIGHT = BEAK = EYE = RESET = ""
+
+
+def info(msg):
+    print(f" {PINE_LIGHT}*{RESET} {msg}")
+
+
+def warn(msg):
+    print(f" {BEAK}!{RESET} {msg}")
+
+
+def error(msg):
+    print(f" {EYE}!!{RESET} {msg}")
 
 
 def read_config(path):
@@ -32,20 +57,37 @@ def compute_diff():
     return sorted(wanted - installed), sorted(installed - wanted)
 
 
+def find_unknown(packages):
+    """Return the packages Portage can't find (typos, removed, or masked)."""
+    portdb = portage.db[portage.root]["porttree"].dbapi
+    unknown = []
+    for pkg in packages:
+        try:
+            if not portdb.match(pkg):
+                unknown.append(pkg)
+        except InvalidAtom:
+            unknown.append(pkg)
+    return unknown
+
+
 def print_diff(to_add, to_remove):
     for pkg in to_add:
-        print(f"  + {pkg}")
+        print(f"  {PINE}+{RESET} {pkg}")
     for pkg in to_remove:
-        print(f"  - {pkg}")
+        print(f"  {EYE}-{RESET} {pkg}")
     print(f"\n{len(to_add)} to add, {len(to_remove)} to remove")
 
 
-def diff():
-    to_add, to_remove = compute_diff()
-    if not to_add and not to_remove:
-        print("System matches system.toml. Nothing to do.")
-        return
-    print_diff(to_add, to_remove)
+def report_unknown(unknown):
+    print()
+    for pkg in unknown:
+        error(f"unknown or masked package: {pkg}")
+
+
+def require_root(command):
+    if os.geteuid() != 0:
+        error(f"crest {command} must be run as root (try: sudo crest {command})")
+        sys.exit(1)
 
 
 def next_generation():
@@ -68,28 +110,44 @@ def take_snapshot():
 
 def run(cmd):
     """Print a command, then run it. Raises an error if it fails."""
-    print(f"\n>>> {' '.join(cmd)}")
+    print(f"\n{PINE}>>>{RESET} {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
 
+def diff():
+    to_add, to_remove = compute_diff()
+    if not to_add and not to_remove:
+        info("System matches system.toml. Nothing to do.")
+        return
+    print_diff(to_add, to_remove)
+    unknown = find_unknown(to_add)
+    if unknown:
+        report_unknown(unknown)
+
+
 def apply():
-    if os.geteuid() != 0:
-        print("crest apply must be run as root (try: sudo crest apply)")
-        sys.exit(1)
+    require_root("apply")
 
     to_add, to_remove = compute_diff()
     if not to_add and not to_remove:
-        print("System matches system.toml. Nothing to do.")
+        info("System matches system.toml. Nothing to do.")
         return
 
     print_diff(to_add, to_remove)
+
+    unknown = find_unknown(to_add)
+    if unknown:
+        report_unknown(unknown)
+        error("Fix system.toml and try again. Nothing was changed.")
+        sys.exit(1)
+
     answer = input("\nApply these changes? [y/N] ").strip().lower()
     if answer != "y":
-        print("Aborted. Nothing was changed.")
+        info("Aborted. Nothing was changed.")
         return
 
     gen = take_snapshot()
-    print(f" * Snapshot taken: gen-{gen} (your undo point)")
+    info(f"Snapshot taken: gen-{gen} (your undo point)")
 
     try:
         if to_add:
@@ -98,20 +156,17 @@ def apply():
             run(["emerge", "--deselect", *to_remove])
             run(["emerge", "--ask", "--depclean", *to_remove])
     except subprocess.CalledProcessError:
-        print(f"\ncrest: emerge failed. Your system from before this apply is saved as gen-{gen}.")
+        error(f"emerge failed. Your system from before this apply is saved as gen-{gen}.")
         sys.exit(1)
 
-    print("\n * Done.")
+    info("Done.")
 
 
 def clean():
     """Remove ALL orphaned packages system-wide, with a snapshot first."""
-    if os.geteuid() != 0:
-        print("crest clean must be run as root (try: sudo crest clean)")
-        sys.exit(1)
-
+    require_root("clean")
     gen = take_snapshot()
-    print(f" * Snapshot taken: gen-{gen} (your undo point)")
+    info(f"Snapshot taken: gen-{gen} (your undo point)")
     run(["emerge", "--ask", "--depclean"])
 
 
@@ -128,7 +183,7 @@ def main():
     elif command == "clean":
         clean()
     else:
-        print(f"crest: unknown command '{command}'")
+        error(f"unknown command '{command}'")
         sys.exit(1)
 
 
